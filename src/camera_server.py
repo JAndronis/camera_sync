@@ -2,6 +2,7 @@ import argparse
 import dataclasses
 import io
 import json
+import logging
 import math
 import queue
 import signal
@@ -18,6 +19,35 @@ from matplotlib.figure import Figure
 from flask import Flask, Response, jsonify
 
 matplotlib.use("Agg")  # non-interactive backend, required for server-side rendering
+
+
+def _setup_logger(log_file: str = "camera_server.log") -> logging.Logger:
+    logger = logging.getLogger("camera_server")
+    logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(threadName)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(fmt)
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(fmt)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+
+    # Silence werkzeug's default handler so Flask logs go through ours only
+    logging.getLogger("werkzeug").handlers.clear()
+    logging.getLogger("werkzeug").addHandler(file_handler)
+    logging.getLogger("werkzeug").addHandler(stream_handler)
+
+    return logger
+
+
+logger = _setup_logger()
 
 app = Flask(__name__)
 
@@ -92,7 +122,11 @@ def capture_loop():
     while True:
         ret, frame = cap.read()
         if not ret:
-            state["error"] = "Failed to capture frame"
+            msg = "Failed to capture frame"
+            if state["error"] != msg:
+                logger.error(msg)
+            state["error"] = msg
+            time.sleep(0.05)
             continue
         with frame_lock:
             latest_frame = frame.copy()
@@ -100,7 +134,10 @@ def capture_loop():
                 try:
                     encode_queue.put(frame.copy())
                 except queue.Full:
-                    state["error"] = "Encoding queue is full, dropping frame"
+                    msg = "Encoding queue is full, dropping frame"
+                    if state["error"] != msg:
+                        logger.warning(msg)
+                    state["error"] = msg
 
 
 def encoding_loop():
@@ -115,7 +152,9 @@ def encoding_loop():
                 try:
                     proc.stdin.write(frame)
                 except BrokenPipeError:
-                    state["error"] = "FFmpeg process has terminated unexpectedly"
+                    msg = "FFmpeg process has terminated unexpectedly"
+                    logger.error(msg)
+                    state["error"] = msg
                     state["recording"] = False
 
 
@@ -252,6 +291,7 @@ def start_recording():
         ffmpeg_process = proc
 
     state.update({"recording": True, "filename": filename, "error": None})
+    logger.info("Recording started: %s (%dx%d @ %d fps)", filename, w, h, RECORD_FPS)
     return jsonify({"message": "Recording started", "filename": filename})
 
 
@@ -282,6 +322,10 @@ def stop_recording():
     with measurements_lock:
         n = len(measurements)
 
+    logger.info(
+        "Recording stopped: %s (%d measurements, error=%s)",
+        state["filename"], n, state["error"],
+    )
     return jsonify(
         {
             "message": "Recording stopped",
@@ -384,7 +428,7 @@ def status():
 
 def _shutdown(sig, frame):
     global ffmpeg_process
-    print("\nShutting down ffmpeg gracefully...\n")
+    logger.info("Shutting down (signal %s)", sig)
     if ffmpeg_process is not None:
         ffmpeg_process.kill()
     cap.release()
@@ -394,5 +438,5 @@ def _shutdown(sig, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
-    print(f"Starting with config: {config}")
+    logger.info("Starting with config: %s", config)
     app.run(host="0.0.0.0", port=8989, threaded=True)
