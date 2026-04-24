@@ -65,6 +65,9 @@ class Config:
     threshold: int = 127  # binary threshold (0-255); pixels below → foreground
     min_contour_area: float = 200.0  # px²
     max_contour_area: float = 100000.0  # px²
+    # Optional crop applied before detection; set to [x, y, width, height] in pixels.
+    # Strongly recommended: keeps the cylinder / transducers out of the search area.
+    roi: list | None = dataclasses.field(default=None)
 
 
 def _parse_args():
@@ -78,6 +81,8 @@ def _parse_args():
     p.add_argument("--threshold", type=int)
     p.add_argument("--min-contour-area", type=float)
     p.add_argument("--max-contour-area", type=float)
+    p.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
+                   help="Detection region in pixels: x y width height")
     return p.parse_args()
 
 
@@ -97,6 +102,7 @@ def _build_config(args) -> Config:
         "threshold": args.threshold,
         "min_contour_area": args.min_contour_area,
         "max_contour_area": args.max_contour_area,
+        "roi": args.roi,
     }
     for attr, val in cli_overrides.items():
         if val is not None:
@@ -161,10 +167,16 @@ def encoding_loop():
 
 
 def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
-    """Fit an ellipse to the largest foreground contour.
+    """Fit an ellipse to the largest foreground contour within the configured ROI.
 
-    Returns (measurement_dict, cv2_ellipse) or (None, None) if no contour found.
+    Returns (measurement_dict, cv2_ellipse_in_full_frame) or (None, None).
     """
+    roi_offset_x = roi_offset_y = 0
+    if config.roi is not None:
+        rx, ry, rw, rh = config.roi
+        frame = frame[ry : ry + rh, rx : rx + rw]
+        roi_offset_x, roi_offset_y = rx, ry
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     k = config.blur_kernel | 1  # ensure odd
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
@@ -183,9 +195,15 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
 
     contour = max(candidates, key=cv2.contourArea)
     ellipse = cv2.fitEllipse(contour)
-    (cx_px, cy_px), (axis1_px, axis2_px), _ = ellipse
+    (cx_px, cy_px), axes_px, angle = ellipse
+
+    # Shift ellipse centre back to full-frame coordinates for drawing
+    cx_full = cx_px + roi_offset_x
+    cy_full = cy_px + roi_offset_y
+    ellipse_full_frame = ((cx_full, cy_full), axes_px, angle)
 
     # Convert to mm; semi-axes (half the full axis lengths)
+    axis1_px, axis2_px = axes_px
     a_mm = max(axis1_px, axis2_px) / 2.0 / config.pixels_per_mm  # equatorial semi-axis
     b_mm = min(axis1_px, axis2_px) / 2.0 / config.pixels_per_mm  # polar semi-axis
 
@@ -194,11 +212,11 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
 
     measurement = {
         "timestamp": time.time(),
-        "cx_mm": cx_px / config.pixels_per_mm,
-        "cy_mm": cy_px / config.pixels_per_mm,
+        "cx_mm": cx_full / config.pixels_per_mm,
+        "cy_mm": cy_full / config.pixels_per_mm,
         "volume_mm3": volume_mm3,
     }
-    return measurement, ellipse
+    return measurement, ellipse_full_frame
 
 
 def ellipse_detection_loop():
@@ -214,9 +232,13 @@ def ellipse_detection_loop():
         measurement, ellipse = _detect_ellipse(frame)
 
         annotated = frame
-        if ellipse is not None:
+        if ellipse is not None or config.roi is not None:
             annotated = frame.copy()
-            cv2.ellipse(annotated, ellipse, (0, 255, 0), 2)
+            if config.roi is not None:
+                rx, ry, rw, rh = config.roi
+                cv2.rectangle(annotated, (rx, ry), (rx + rw, ry + rh), (0, 200, 255), 1)
+            if ellipse is not None:
+                cv2.ellipse(annotated, ellipse, (0, 255, 0), 2)
 
         with annotated_frame_lock:
             latest_annotated_frame = annotated
