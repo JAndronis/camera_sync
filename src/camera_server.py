@@ -65,6 +65,9 @@ class Config:
     threshold: int = 127  # binary threshold (0-255); pixels below → foreground
     min_contour_area: float = 200.0  # px²
     max_contour_area: float = 100000.0  # px²
+    # Morphological closing kernel size (px). Fills bright specular reflections that
+    # would otherwise leave a hole in the binary droplet blob. 0 = disabled.
+    morph_close_size: int = 0
     # Optional crop applied before detection; set to [x, y, width, height] in pixels.
     # Strongly recommended: keeps the cylinder / transducers out of the search area.
     roi: list | None = dataclasses.field(default=None)
@@ -81,6 +84,8 @@ def _parse_args():
     p.add_argument("--threshold", type=int)
     p.add_argument("--min-contour-area", type=float)
     p.add_argument("--max-contour-area", type=float)
+    p.add_argument("--morph-close-size", type=int,
+                   help="Closing kernel size (px) to fill specular reflection holes; 0=off")
     p.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                    help="Detection region in pixels: x y width height")
     p.add_argument("--debug", action="store_true",
@@ -104,6 +109,7 @@ def _build_config(args) -> Config:
         "threshold": args.threshold,
         "min_contour_area": args.min_contour_area,
         "max_contour_area": args.max_contour_area,
+        "morph_close_size": args.morph_close_size,
         "roi": args.roi,
     }
     for attr, val in cli_overrides.items():
@@ -186,6 +192,11 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
     # THRESH_BINARY_INV: pixels below threshold become foreground (white)
     _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
+    if config.morph_close_size > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (config.morph_close_size, config.morph_close_size)
+        )
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     candidates = [
@@ -397,6 +408,11 @@ def debug_frame():
     k = config.blur_kernel | 1
     blurred = cv2.GaussianBlur(gray, (k, k), 0)
     _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
+    if config.morph_close_size > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (config.morph_close_size, config.morph_close_size)
+        )
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # Render binary as BGR so we can draw coloured overlays
@@ -416,7 +432,7 @@ def debug_frame():
 
     # Annotate with current param values so a screenshot is self-documenting
     lines = [
-        f"threshold={config.threshold}  blur={config.blur_kernel}",
+        f"threshold={config.threshold}  blur={config.blur_kernel}  close={config.morph_close_size}",
         f"min_area={config.min_contour_area:.0f}  max_area={config.max_contour_area:.0f}",
         f"candidates={len(candidates)}  all_contours={len(contours)}",
     ]

@@ -5,5 +5,6 @@
   "threshold": 110,
   "min_contour_area": 50,
   "max_contour_area": 80000,
+  "morph_close_size": 15,
   "roi": [450, 280, 350, 250]
 }
