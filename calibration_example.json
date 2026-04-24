@@ -1,0 +1,8 @@
+{
+  "camera_index": 0,
+  "pixels_per_mm": 45.2,
+  "blur_kernel": 7,
+  "threshold": 110,
+  "min_contour_area": 500,
+  "max_contour_area": 80000
+}
