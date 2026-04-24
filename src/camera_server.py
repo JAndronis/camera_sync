@@ -374,6 +374,58 @@ def stop_recording():
     )
 
 
+@app.route("/debug_frame")
+def debug_frame():
+    """Return the binary threshold image (within ROI) that the ellipse detector sees.
+
+    Detected contour candidates are outlined in white; the chosen contour in red.
+    Useful for tuning threshold, blur_kernel, and min/max_contour_area.
+    """
+    with frame_lock:
+        frame = latest_frame.copy() if latest_frame is not None else None
+    if frame is None:
+        return Response("No frame available yet", status=503, mimetype="text/plain")
+
+    if config.roi is not None:
+        rx, ry, rw, rh = config.roi
+        frame = frame[ry : ry + rh, rx : rx + rw]
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    k = config.blur_kernel | 1
+    blurred = cv2.GaussianBlur(gray, (k, k), 0)
+    _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Render binary as BGR so we can draw coloured overlays
+    debug = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    candidates = [
+        c for c in contours
+        if config.min_contour_area <= cv2.contourArea(c) <= config.max_contour_area
+        and len(c) >= 5
+    ]
+    # All contours in the frame (grey), candidates in white, winner in red
+    cv2.drawContours(debug, contours, -1, (100, 100, 100), 1)
+    cv2.drawContours(debug, candidates, -1, (255, 255, 255), 1)
+    if candidates:
+        winner = max(candidates, key=cv2.contourArea)
+        cv2.drawContours(debug, [winner], -1, (0, 0, 255), 2)
+
+    # Annotate with current param values so a screenshot is self-documenting
+    lines = [
+        f"threshold={config.threshold}  blur={config.blur_kernel}",
+        f"min_area={config.min_contour_area:.0f}  max_area={config.max_contour_area:.0f}",
+        f"candidates={len(candidates)}  all_contours={len(contours)}",
+    ]
+    for i, txt in enumerate(lines):
+        cv2.putText(debug, txt, (6, 18 + i * 18), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 220, 255), 1, cv2.LINE_AA)
+
+    _, buf = cv2.imencode(".jpg", debug, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return Response(buf.tobytes(), mimetype="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.route("/measurements")
 def get_measurements():
     with measurements_lock:

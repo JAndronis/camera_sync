@@ -3,7 +3,7 @@
   "pixels_per_mm": 45.2,
   "blur_kernel": 7,
   "threshold": 110,
-  "min_contour_area": 500,
+  "min_contour_area": 50,
   "max_contour_area": 80000,
   "roi": [450, 280, 350, 250]
 }
