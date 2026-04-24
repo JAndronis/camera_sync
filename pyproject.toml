@@ -10,5 +10,6 @@ dependencies = [
     "sardana",
     "pandablocks",
     "flask",
-    "jsonify"
+    "requests",
+    "ipython"
 ]
