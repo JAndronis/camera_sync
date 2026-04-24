@@ -83,6 +83,8 @@ def _parse_args():
     p.add_argument("--max-contour-area", type=float)
     p.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                    help="Detection region in pixels: x y width height")
+    p.add_argument("--debug", action="store_true",
+                   help="Enable /debug_frame endpoint (shows binary threshold image)")
     return p.parse_args()
 
 
@@ -110,7 +112,9 @@ def _build_config(args) -> Config:
     return cfg
 
 
-config = _build_config(_parse_args())
+_args = _parse_args()
+config = _build_config(_args)
+DEBUG_MODE: bool = _args.debug
 
 cap = cv2.VideoCapture(config.camera_index)
 frame_lock = threading.Lock()
@@ -374,12 +378,11 @@ def stop_recording():
     )
 
 
-@app.route("/debug_frame")
 def debug_frame():
     """Return the binary threshold image (within ROI) that the ellipse detector sees.
 
-    Detected contour candidates are outlined in white; the chosen contour in red.
-    Useful for tuning threshold, blur_kernel, and min/max_contour_area.
+    Only registered when --debug is passed. Detected contour candidates are
+    outlined in white; the chosen contour in red.
     """
     with frame_lock:
         frame = latest_frame.copy() if latest_frame is not None else None
@@ -424,6 +427,10 @@ def debug_frame():
     _, buf = cv2.imencode(".jpg", debug, [cv2.IMWRITE_JPEG_QUALITY, 90])
     return Response(buf.tobytes(), mimetype="image/jpeg",
                     headers={"Cache-Control": "no-store"})
+
+
+if DEBUG_MODE:
+    app.add_url_rule("/debug_frame", "debug_frame", debug_frame)
 
 
 @app.route("/measurements")
