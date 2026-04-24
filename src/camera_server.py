@@ -15,8 +15,8 @@ from datetime import datetime
 import cv2
 import matplotlib
 import matplotlib.ticker as mticker
-from matplotlib.figure import Figure
 from flask import Flask, Response, jsonify
+from matplotlib.figure import Figure
 
 matplotlib.use("Agg")  # non-interactive backend, required for server-side rendering
 
@@ -61,14 +61,16 @@ class Config:
     camera_index: int = 0
     pixels_per_mm: float = 1.0
     # Ellipse detection params
-    blur_kernel: int = 5         # Gaussian blur kernel size (must be odd)
-    threshold: int = 127         # binary threshold (0-255); pixels below → foreground
-    min_contour_area: float = 200.0   # px²
+    blur_kernel: int = 5  # Gaussian blur kernel size (must be odd)
+    threshold: int = 127  # binary threshold (0-255); pixels below → foreground
+    min_contour_area: float = 200.0  # px²
     max_contour_area: float = 100000.0  # px²
 
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="Microscope camera server with ellipse tracking")
+    p = argparse.ArgumentParser(
+        description="Microscope camera server with ellipse tracking"
+    )
     p.add_argument("--config", metavar="FILE", help="JSON calibration config file")
     p.add_argument("--camera-index", type=int)
     p.add_argument("--pixels-per-mm", type=float)
@@ -171,7 +173,8 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     candidates = [
-        c for c in contours
+        c
+        for c in contours
         if config.min_contour_area <= cv2.contourArea(c) <= config.max_contour_area
         and len(c) >= 5  # fitEllipse requires at least 5 points
     ]
@@ -187,7 +190,7 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
     b_mm = min(axis1_px, axis2_px) / 2.0 / config.pixels_per_mm  # polar semi-axis
 
     # Oblate spheroid (axial symmetry around the polar axis): V = (4/3) * pi * a^2 * b
-    volume_mm3 = (4.0 / 3.0) * math.pi * a_mm ** 2 * b_mm
+    volume_mm3 = (4.0 / 3.0) * math.pi * a_mm**2 * b_mm
 
     measurement = {
         "timestamp": time.time(),
@@ -271,17 +274,28 @@ def start_recording():
     proc = subprocess.Popen(
         [
             "ffmpeg",
-            "-loglevel", "error",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            "-s", f"{w}x{h}",
-            "-r", str(RECORD_FPS),
-            "-i", "pipe:0",
-            "-vcodec", "libx264",
-            "-crf", str(H264_CRF),
-            "-preset", "fast",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{w}x{h}",
+            "-r",
+            str(RECORD_FPS),
+            "-i",
+            "pipe:0",
+            "-vcodec",
+            "libx264",
+            "-crf",
+            str(H264_CRF),
+            "-preset",
+            "fast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
             filename,
         ],
         stdin=subprocess.PIPE,
@@ -324,7 +338,9 @@ def stop_recording():
 
     logger.info(
         "Recording stopped: %s (%d measurements, error=%s)",
-        state["filename"], n, state["error"],
+        state["filename"],
+        n,
+        state["error"],
     )
     return jsonify(
         {
@@ -399,8 +415,15 @@ def volume_plot_png():
         ax.plot(times, volumes, color="#4da6ff", linewidth=1.5)
         ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.4f"))
     else:
-        ax.text(0.5, 0.5, "No data yet — start a recording",
-                transform=ax.transAxes, ha="center", va="center", color="#888")
+        ax.text(
+            0.5,
+            0.5,
+            "No data yet — start a recording",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            color="#888",
+        )
 
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Volume (mm³)")
@@ -410,8 +433,9 @@ def volume_plot_png():
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110)
     buf.seek(0)
-    return Response(buf.getvalue(), mimetype="image/png",
-                    headers={"Cache-Control": "no-store"})
+    return Response(
+        buf.getvalue(), mimetype="image/png", headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.route("/calibration")
@@ -423,7 +447,9 @@ def get_calibration():
 def status():
     with measurements_lock:
         n = len(measurements)
-    return jsonify({**state, "camera_connected": cap.isOpened(), "measurement_count": n})
+    return jsonify(
+        {**state, "camera_connected": cap.isOpened(), "measurement_count": n}
+    )
 
 
 def _shutdown(sig, frame):

@@ -5,8 +5,8 @@ import numpy as np
 import requests
 from sardana.macroserver.macro import Macro, Type
 
-CAMERA_URL = "http://<hutch-laptop-ip>:8989" # TODO: make this configurable via env var or macro arg
-TIMEOUT = 10 # TODO: also make this configurable, and maybe add retry logic to handle transient failures better
+CAMERA_URL = "http://<hutch-laptop-ip>:8989"  # TODO: make this configurable via env var or macro arg
+TIMEOUT = 10  # TODO: also make this configurable, and maybe add retry logic to handle transient failures better
 
 
 class camera_scan(Macro):
@@ -107,8 +107,8 @@ class camera_scan(Macro):
                     mgrp.attrs["NX_class"] = "NXcollection"
                     arrays = {
                         "timestamp": np.array([m["timestamp"] for m in measurements]),
-                        "cx_mm":     np.array([m["cx_mm"]     for m in measurements]),
-                        "cy_mm":     np.array([m["cy_mm"]     for m in measurements]),
+                        "cx_mm": np.array([m["cx_mm"] for m in measurements]),
+                        "cy_mm": np.array([m["cy_mm"] for m in measurements]),
                         "volume_mm3": np.array([m["volume_mm3"] for m in measurements]),
                     }
                     for dset_name, data in arrays.items():
