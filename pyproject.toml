@@ -11,5 +11,7 @@ dependencies = [
     "pandablocks",
     "flask",
     "requests",
-    "ipython"
+    "ipython",
+    "h5py",
+    "matplotlib"
 ]
