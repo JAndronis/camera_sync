@@ -1,6 +1,3 @@
-import os
-
-import h5py
 import numpy as np
 import requests
 from sardana.macroserver.macro import Macro, Type
@@ -78,57 +75,24 @@ class camera_scan(Macro):
             self.warning(f"Failed to fetch measurements: {e}")
             return []
 
-    def _write_to_hdf5(self, video_filename, measurements: list[dict]):
-        scan_dir = self.getEnv("ScanDir")
-        scan_file = self.getEnv("ScanFile")
-        if isinstance(scan_file, (list, tuple)):
-            scan_file = next((f for f in scan_file if f.endswith(".h5")), None)
-        if not scan_file:
-            self.warning("No HDF5 scan file found, skipping metadata write")
-            return
-        h5_path = os.path.join(scan_dir, scan_file)
-        if not os.path.exists(h5_path):
-            self.warning(f"HDF5 file not found at {h5_path}")
+    def _write_measurements(self, scan_macro, measurements: list[dict]):
+        """Write ellipse timestamp and volume arrays via the scan data handler.
+
+        Called after the scan has finished so all other devices have already
+        flushed their data.
+        """
+        if not measurements:
+            self.warning("No ellipse measurements to write")
             return
         try:
-            with h5py.File(h5_path, "a") as f:
-                entries = sorted(k for k in f.keys() if k.startswith("entry"))
-                grp = f[entries[-1]].require_group("custom_data")
-                grp.attrs["NX_class"] = "NXcollection"
-
-                for name in ("video_file", "camera_preview_url"):
-                    if name in grp:
-                        del grp[name]
-                grp.create_dataset("video_file", data=video_filename)
-                grp.create_dataset("camera_preview_url", data=f"{CAMERA_URL}/preview")
-
-                if measurements:
-                    mgrp = grp.require_group("ellipse_tracking")
-                    mgrp.attrs["NX_class"] = "NXcollection"
-                    arrays = {
-                        "timestamp": np.array([m["timestamp"] for m in measurements]),
-                        "cx_mm": np.array([m["cx_mm"] for m in measurements]),
-                        "cy_mm": np.array([m["cy_mm"] for m in measurements]),
-                        "volume_mm3": np.array([m["volume_mm3"] for m in measurements]),
-                    }
-                    for dset_name, data in arrays.items():
-                        if dset_name in mgrp:
-                            del mgrp[dset_name]
-                        mgrp.create_dataset(dset_name, data=data)
-                    mgrp.attrs["volume_model"] = "oblate_spheroid"
-                    mgrp.attrs["description"] = (
-                        "Ellipse fit per frame: cx/cy are droplet center in mm, "
-                        "volume assumes oblate spheroid V=(4/3)*pi*a^2*b."
-                    )
-                    self.info(
-                        f"Written {len(measurements)} ellipse measurements to {h5_path}"
-                    )
-                else:
-                    self.warning("No ellipse measurements to write")
-
-            self.info(f"Camera metadata written to {h5_path}")
+            dh = scan_macro._gScan._data_handler  # type: ignore[attr-defined]
+            timestamps = np.array([m["timestamp"] for m in measurements], dtype=float)
+            volumes = np.array([m["volume_mm3"] for m in measurements], dtype=float)
+            dh.addCustomData(timestamps, "side_camera_timestamp", dtype=float)
+            dh.addCustomData(volumes, "side_camera_volume_mm3", dtype=float)
+            self.info(f"Written {len(measurements)} ellipse measurements via addCustomData")
         except Exception as e:
-            self.warning(f"Could not write to HDF5: {e}")
+            self.warning(f"Could not write measurements: {e}")
 
     def run(self, scan_macro, scan_args):
         video_filename = None
@@ -149,8 +113,9 @@ class camera_scan(Macro):
             return None
 
         # 3. Run the scan — always stop camera afterwards
+        inner_macro = None
         try:
-            self.execMacro([scan_macro] + scan_args)
+            inner_macro = self.execMacro([scan_macro] + scan_args)
         except Exception as e:
             self.error(f"Scan failed: {e}")
         finally:
@@ -165,6 +130,7 @@ class camera_scan(Macro):
 
         # 5. Persist filename and measurements
         self.setEnv("LastVideoFile", video_filename)
-        self._write_to_hdf5(video_filename, measurements)
+        if inner_macro is not None:
+            self._write_measurements(inner_macro, measurements)
 
         return video_filename
