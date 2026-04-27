@@ -4,8 +4,6 @@ from sardana.macroserver.macro import Macro, Type
 
 CAMERA_URL = "http://<hutch-laptop-ip>:8989"  # TODO: make this configurable via env var or macro arg
 TIMEOUT = 10  # TODO: also make this configurable, and maybe add retry logic to handle transient failures better
-session = requests.Session()
-session.trust_env = False
 
 class camera_scan(Macro):
     """
@@ -28,11 +26,16 @@ class camera_scan(Macro):
     ]
 
     result_def = [["video_file", Type.String, None, "Recorded video filename"]]
+    
+    def prepare(self, *args, **kwargs):
+        self.session = requests.Session()
+        self.session.trust_env = False
+        return super().prepare(*args, **kwargs)
 
     def _check_server(self):
         """Verify the camera server is reachable and the camera is live."""
         try:
-            r = session.get(f"{CAMERA_URL}/status", timeout=TIMEOUT)
+            r = self.session.get(f"{CAMERA_URL}/status", timeout=TIMEOUT)
             r.raise_for_status()
             status = r.json()
             # If latest_frame is None the capture_loop hasn't started yet
@@ -47,7 +50,7 @@ class camera_scan(Macro):
 
     def _start_camera(self):
         try:
-            r = session.post(f"{CAMERA_URL}/start", timeout=TIMEOUT)
+            r = self.session.post(f"{CAMERA_URL}/start", timeout=TIMEOUT)
             r.raise_for_status()
             filename = r.json().get("filename")
             if not filename:
@@ -59,7 +62,7 @@ class camera_scan(Macro):
 
     def _stop_camera(self):
         try:
-            r = session.post(f"{CAMERA_URL}/stop", timeout=TIMEOUT)
+            r = self.session.post(f"{CAMERA_URL}/stop", timeout=TIMEOUT)
             data = r.json()
             return data.get("filename"), data.get("error")
         except Exception as e:
@@ -69,7 +72,7 @@ class camera_scan(Macro):
     def _fetch_measurements(self) -> list[dict]:
         """Fetch the ellipse measurement time-series from the server."""
         try:
-            r = session.get(f"{CAMERA_URL}/measurements", timeout=TIMEOUT)
+            r = self.session.get(f"{CAMERA_URL}/measurements", timeout=TIMEOUT)
             r.raise_for_status()
             return r.json()
         except Exception as e:
