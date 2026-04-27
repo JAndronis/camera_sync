@@ -101,13 +101,16 @@ class camera_scan(Macro):
         # 1. Pre-flight: confirm server is up and camera is live
         try:
             self._check_server()
+            self.info("Camera server is online and working fine.")
         except RuntimeError as e:
             self.error(str(e))
+            self.warning(f"Camera server is not running, error is {str(e)}. Scan will not have video.")
             return None
 
         # 2. Start recording (also clears any previous measurements on the server)
         try:
             video_filename = self._start_camera()
+            self.info("Camera video started")
         except RuntimeError as e:
             self.error(str(e))
             self.warning("Scan will NOT run — camera recording could not start.")
@@ -124,6 +127,8 @@ class camera_scan(Macro):
             if cam_error:
                 self.warning(f"Camera error during recording: {cam_error}")
                 self.warning(f"File may be incomplete or corrupted: {stopped_filename}")
+            else:
+                self.infor(f"Camera video saved: {video_filename}")
 
         # 4. Fetch ellipse measurements accumulated during the scan
         measurements = self._fetch_measurements()
