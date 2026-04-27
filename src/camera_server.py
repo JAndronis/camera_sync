@@ -62,9 +62,9 @@ class Config:
     pixels_per_mm: float = 1.0
     # Ellipse detection params
     blur_kernel: int = 5  # Gaussian blur kernel size (must be odd)
-    threshold: int = 127  # binary threshold (0-255); pixels below → foreground
-    min_contour_area: float = 200.0  # px²
-    max_contour_area: float = 100000.0  # px²
+    threshold: int = 127  # binary threshold (0-255); pixels below -> foreground
+    min_contour_area: float = 200.0  # px^2
+    max_contour_area: float = 100000.0  # px^2
     # Morphological closing kernel size (px). Fills bright specular reflections that
     # would otherwise leave a hole in the binary droplet blob. 0 = disabled.
     morph_close_size: int = 0
@@ -84,12 +84,23 @@ def _parse_args():
     p.add_argument("--threshold", type=int)
     p.add_argument("--min-contour-area", type=float)
     p.add_argument("--max-contour-area", type=float)
-    p.add_argument("--morph-close-size", type=int,
-                   help="Closing kernel size (px) to fill specular reflection holes; 0=off")
-    p.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
-                   help="Detection region in pixels: x y width height")
-    p.add_argument("--debug", action="store_true",
-                   help="Enable /debug_frame endpoint (shows binary threshold image)")
+    p.add_argument(
+        "--morph-close-size",
+        type=int,
+        help="Closing kernel size (px) to fill specular reflection holes; 0=off",
+    )
+    p.add_argument(
+        "--roi",
+        type=int,
+        nargs=4,
+        metavar=("X", "Y", "W", "H"),
+        help="Detection region in pixels: x y width height",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable /debug_frame endpoint (shows binary threshold image)",
+    )
     return p.parse_args()
 
 
@@ -419,7 +430,8 @@ def debug_frame():
     debug = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
     candidates = [
-        c for c in contours
+        c
+        for c in contours
         if config.min_contour_area <= cv2.contourArea(c) <= config.max_contour_area
         and len(c) >= 5
     ]
@@ -437,12 +449,21 @@ def debug_frame():
         f"candidates={len(candidates)}  all_contours={len(contours)}",
     ]
     for i, txt in enumerate(lines):
-        cv2.putText(debug, txt, (6, 18 + i * 18), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, (0, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(
+            debug,
+            txt,
+            (6, 18 + i * 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 220, 255),
+            1,
+            cv2.LINE_AA,
+        )
 
     _, buf = cv2.imencode(".jpg", debug, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    return Response(buf.tobytes(), mimetype="image/jpeg",
-                    headers={"Cache-Control": "no-store"})
+    return Response(
+        buf.tobytes(), mimetype="image/jpeg", headers={"Cache-Control": "no-store"}
+    )
 
 
 if DEBUG_MODE:
@@ -515,7 +536,7 @@ def volume_plot_png():
         ax.text(
             0.5,
             0.5,
-            "No data yet — start a recording",
+            "No data yet - start a recording",
             transform=ax.transAxes,
             ha="center",
             va="center",
@@ -523,7 +544,7 @@ def volume_plot_png():
         )
 
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Volume (mm³)")
+    ax.set_ylabel("Volume (mm^3)")
     ax.set_title("Droplet volume over time")
     fig.tight_layout()
 

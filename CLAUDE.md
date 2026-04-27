@@ -28,11 +28,11 @@ uv run ruff format src/
 ```
 
 Key CLI flags for `camera_server.py`:
-- `--config FILE` — JSON calibration file (see `calibration_example.json`)
-- `--roi X Y W H` — constrain ellipse detection to a pixel sub-region
-- `--threshold INT` — binary threshold (pixels below → foreground)
-- `--morph-close-size INT` — morphological closing kernel to fill specular holes; 0 = off
-- `--debug` — gate the `/debug_frame` endpoint (shows binary image + contour overlays)
+- `--config FILE` - JSON calibration file (see `calibration_example.json`)
+- `--roi X Y W H` - constrain ellipse detection to a pixel sub-region
+- `--threshold INT` - binary threshold (pixels below -> foreground)
+- `--morph-close-size INT` - morphological closing kernel to fill specular holes; 0 = off
+- `--debug` - gate the `/debug_frame` endpoint (shows binary image + contour overlays)
 
 ## Architecture
 
@@ -55,10 +55,10 @@ All shared mutable state is protected by explicit `threading.Lock` objects (`fra
 ### Ellipse detection pipeline (`_detect_ellipse`)
 
 1. Crop to ROI (if configured)
-2. Grayscale → Gaussian blur → `THRESH_BINARY_INV` (droplet darker than background)
+2. Grayscale -> Gaussian blur -> `THRESH_BINARY_INV` (droplet darker than background)
 3. Optional morphological closing to fill specular reflection holes
-4. `findContours` → filter by area bounds → `fitEllipse` on the largest candidate
-5. Convert pixel axes to mm using `pixels_per_mm`; compute oblate spheroid volume: `V = (4/3)π·a²·b`
+4. `findContours` -> filter by area bounds -> `fitEllipse` on the largest candidate
+5. Convert pixel axes to mm using `pixels_per_mm`; compute oblate spheroid volume: `V = (4/3)*pi*a^2*b`
 6. Return measurement dict + ellipse in full-frame coordinates (ROI offset added back)
 
 ### HTTP API (Flask, port 8989)
@@ -80,10 +80,10 @@ All shared mutable state is protected by explicit `threading.Lock` objects (`fra
 
 `camera_scan` wraps any Sardana scan macro:
 1. Pre-flight: `GET /status`
-2. `POST /start` → clears server-side measurements, begins video recording
-3. `execMacro(scan_macro, scan_args)` — actual scan
+2. `POST /start` -> clears server-side measurements, begins video recording
+3. `execMacro(scan_macro, scan_args)` - actual scan
 4. `POST /stop` (in `finally` block, always runs)
-5. `GET /measurements` → fetch ellipse time-series
+5. `GET /measurements` -> fetch ellipse time-series
 6. Writes video filename + ellipse arrays to the last `entry` group in the scan's HDF5 file under `custom_data/ellipse_tracking/`
 
 ### Configuration (`Config` dataclass)

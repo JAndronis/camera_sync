@@ -1,9 +1,12 @@
+import logging
+
 import numpy as np
 import requests
 from sardana.macroserver.macro import Macro, Type
 
 CAMERA_URL = "http://<hutch-laptop-ip>:8989"  # TODO: make this configurable via env var or macro arg
 TIMEOUT = 10  # TODO: also make this configurable, and maybe add retry logic to handle transient failures better
+
 
 class camera_scan(Macro):
     """
@@ -26,8 +29,10 @@ class camera_scan(Macro):
     ]
 
     result_def = [["video_file", Type.String, None, "Recorded video filename"]]
-    
+
     def prepare(self, *args, **kwargs):
+        self.output("Preparing...")
+        self.setLogLevel(logging.DEBUG)
         self.session = requests.Session()
         self.session.trust_env = False
         return super().prepare(*args, **kwargs)
@@ -41,7 +46,7 @@ class camera_scan(Macro):
             # If latest_frame is None the capture_loop hasn't started yet
             if not status.get("camera_open", True):
                 raise RuntimeError("Camera server is up but camera is not open")
-            self.info(f"Camera server OK — preview at {CAMERA_URL}/preview")
+            self.info(f"Camera server OK - preview at {CAMERA_URL}/preview")
         except requests.exceptions.ConnectionError:
             raise RuntimeError(
                 f"Camera server unreachable at {CAMERA_URL}. "
@@ -92,9 +97,11 @@ class camera_scan(Macro):
             dh = scan_macro._gScan._data_handler  # type: ignore[attr-defined]
             timestamps = np.array([m["timestamp"] for m in measurements], dtype=float)
             volumes = np.array([m["volume_mm3"] for m in measurements], dtype=float)
-            dh.addCustomData(timestamps, "side_camera_timestamp", dtype=float)
-            dh.addCustomData(volumes, "side_camera_volume_mm3", dtype=float)
-            self.info(f"Written {len(measurements)} ellipse measurements via addCustomData")
+            dh.addCustomData(timestamps, "side_camera_timestamp")
+            dh.addCustomData(volumes, "side_camera_volume_mm3")
+            self.info(
+                f"Written {len(measurements)} ellipse measurements via addCustomData"
+            )
         except Exception as e:
             self.warning(f"Could not write measurements: {e}")
 
@@ -107,7 +114,9 @@ class camera_scan(Macro):
             self.info("Camera server is online and working fine.")
         except RuntimeError as e:
             self.error(str(e))
-            self.warning(f"Camera server is not running, error is {str(e)}. Scan will not have video.")
+            self.warning(
+                f"Camera server is not running, error is {str(e)}. Scan will not have video."
+            )
             return None
 
         # 2. Start recording (also clears any previous measurements on the server)
@@ -116,10 +125,10 @@ class camera_scan(Macro):
             self.info("Camera video started")
         except RuntimeError as e:
             self.error(str(e))
-            self.warning("Scan will NOT run — camera recording could not start.")
+            self.warning("Scan will NOT run - camera recording could not start.")
             return None
 
-        # 3. Run the scan — always stop camera afterwards
+        # 3. Run the scan - always stop camera afterwards
         inner_macro = None
         try:
             inner_macro = self.execMacro([scan_macro] + scan_args)
