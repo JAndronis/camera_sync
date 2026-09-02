@@ -13,5 +13,7 @@ dependencies = [
     "requests",
     "ipython",
     "h5py",
-    "matplotlib"
+    "matplotlib",
+    "scipy>=1.18.1",
+    "scikit-image>=0.26.0",
 ]

@@ -16,6 +16,7 @@ Full reference for the config file, CLI flags, HTTP API, and Sardana macro. For 
 | `max_contour_area` | `--max-contour-area` | `100000.0` | Maximum contour area (px²) to be considered a candidate |
 | `morph_close_size` | `--morph-close-size` | `0` | Morphological closing kernel size (px) to fill specular holes; `0` disables it |
 | `roi` | `--roi X Y W H` | `None` (full frame) | Crop applied before detection: `[x, y, width, height]` in pixels |
+| `use_gradient` | `--use-gradient` / `--no-use-gradient` | `False` | Threshold Sobel gradient magnitude instead of absolute intensity — see below |
 
 Other flags:
 
@@ -39,14 +40,27 @@ For each frame, in order:
 
 1. Crop to `roi` if configured.
 2. Convert to grayscale, Gaussian blur with `blur_kernel`.
-3. `THRESH_BINARY_INV` at `threshold` — droplet must be darker than the background for this to work.
-4. Optional morphological closing (`morph_close_size`) to bridge specular reflection holes.
+3. Threshold into a binary foreground mask (see "Absolute vs. gradient thresholding" below).
+4. Optional morphological closing (`morph_close_size`) to bridge specular reflection holes (or gaps in the gradient ring, in gradient mode).
 5. `findContours`, filtered to `min_contour_area <= area <= max_contour_area` and at least 5 points (`fitEllipse`'s minimum). The largest surviving contour is used — if more than one object matches, only one is tracked, whichever is bigger.
-6. `fitEllipse` on that contour, in ROI-local pixel coordinates.
+6. `fitEllipse` on that contour, in ROI-local pixel coordinates. If the fit fails on a degenerate contour (e.g. near-collinear points), the frame is skipped rather than crashing the detection thread.
 7. Convert to full-frame coordinates (add the ROI offset back), then to mm using `pixels_per_mm`.
 8. Volume is computed treating the droplet as an **oblate spheroid**, symmetric about the shorter (polar) axis: `V = (4/3) * pi * a^2 * b`, where `a` is the semi-major (equatorial) axis and `b` is the semi-minor (polar) axis, both in mm.
 
 If no contour survives the filters, no ellipse is drawn and no measurement is recorded for that frame — the pipeline does not interpolate or hold the last value.
+
+### Absolute vs. gradient thresholding
+
+By default (`use_gradient: false`), step 3 is `THRESH_BINARY_INV` at `threshold` — pixels **darker** than `threshold` become foreground. This requires the droplet to sit at a fairly stable absolute brightness relative to the background.
+
+Setting `use_gradient: true` (or `--use-gradient`) switches step 3 to thresholding the **Sobel gradient magnitude** of the blurred image instead — pixels sitting on a strong edge become foreground, regardless of which side is brighter. This trades one failure mode for another:
+
+- **More robust to**: illumination drift over a beamtime (it reacts to local contrast, not absolute brightness), and specular reflections splitting the blob (there's no interior to fill, so no hole to patch).
+- **Less robust to**: any other sharp edge inside the ROI (a transducer edge, a scratch on the cell window) — there's no "pick the biggest blob" equivalent at the edge-detection stage, only at the final contour-area filter.
+
+`threshold` means something completely different in this mode (gradient magnitude, roughly `0`–`1400` for an 8-bit image, instead of `0`–`255` intensity) — **re-tune it from scratch via `/debug_frame`** after switching, don't just flip the flag and expect the same numeric threshold to work.
+
+This was ported from a similar per-column edge-detection approach used at the MID beamline for the same acoustic-levitator droplet-tracking problem, adapted here to plug into the existing contour/`fitEllipse` pipeline rather than MID's direct point-cloud ellipse fit.
 
 ## HTTP API
 

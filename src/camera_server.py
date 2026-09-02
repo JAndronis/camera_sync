@@ -71,6 +71,11 @@ class Config:
     # Optional crop applied before detection; set to [x, y, width, height] in pixels.
     # Strongly recommended: keeps the cylinder / transducers out of the search area.
     roi: list | None = dataclasses.field(default=None)
+    # Threshold Sobel gradient magnitude instead of absolute intensity. More robust
+    # to illumination drift and specular holes, more sensitive to other edges inside
+    # the ROI. Uses the same `threshold` field, but on a very different scale -
+    # re-tune via /debug_frame after switching.
+    use_gradient: bool = False
 
 
 def _parse_args():
@@ -95,6 +100,13 @@ def _parse_args():
         nargs=4,
         metavar=("X", "Y", "W", "H"),
         help="Detection region in pixels: x y width height",
+    )
+    p.add_argument(
+        "--use-gradient",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Threshold gradient magnitude instead of absolute intensity "
+        "(re-tune --threshold after switching; see docs/SETUP.md)",
     )
     p.add_argument(
         "--debug",
@@ -122,6 +134,7 @@ def _build_config(args) -> Config:
         "max_contour_area": args.max_contour_area,
         "morph_close_size": args.morph_close_size,
         "roi": args.roi,
+        "use_gradient": args.use_gradient,
     }
     for attr, val in cli_overrides.items():
         if val is not None:
@@ -187,6 +200,36 @@ def encoding_loop():
                     state["recording"] = False
 
 
+def _binarize(frame):
+    """Grayscale, blur, and threshold a frame into a binary foreground mask.
+
+    Uses absolute intensity by default (THRESH_BINARY_INV: pixels below
+    `threshold` become foreground). If config.use_gradient is set, thresholds
+    Sobel gradient magnitude instead - more robust to illumination drift and
+    to specular reflections splitting the blob, but more sensitive to any
+    other sharp edge inside the ROI.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    k = config.blur_kernel | 1  # ensure odd
+    blurred = cv2.GaussianBlur(gray, (k, k), 0)
+
+    if config.use_gradient:
+        gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0)
+        gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1)
+        gradient_mag = cv2.magnitude(gx, gy)
+        _, binary = cv2.threshold(gradient_mag, config.threshold, 255, cv2.THRESH_BINARY)
+        binary = binary.astype("uint8")
+    else:
+        _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
+
+    if config.morph_close_size > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (config.morph_close_size, config.morph_close_size)
+        )
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    return binary
+
+
 def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
     """Fit an ellipse to the largest foreground contour within the configured ROI.
 
@@ -198,16 +241,7 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
         frame = frame[ry : ry + rh, rx : rx + rw]
         roi_offset_x, roi_offset_y = rx, ry
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    k = config.blur_kernel | 1  # ensure odd
-    blurred = cv2.GaussianBlur(gray, (k, k), 0)
-    # THRESH_BINARY_INV: pixels below threshold become foreground (white)
-    _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
-    if config.morph_close_size > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (config.morph_close_size, config.morph_close_size)
-        )
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    binary = _binarize(frame)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     candidates = [
@@ -220,7 +254,12 @@ def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
         return None, None
 
     contour = max(candidates, key=cv2.contourArea)
-    ellipse = cv2.fitEllipse(contour)
+    try:
+        ellipse = cv2.fitEllipse(contour)
+    except cv2.error:
+        # Degenerate contour (e.g. near-collinear points) - skip this frame
+        # rather than letting the exception kill the detection thread.
+        return None, None
     (cx_px, cy_px), axes_px, angle = ellipse
 
     # Shift ellipse centre back to full-frame coordinates for drawing
@@ -415,15 +454,7 @@ def debug_frame():
         rx, ry, rw, rh = config.roi
         frame = frame[ry : ry + rh, rx : rx + rw]
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    k = config.blur_kernel | 1
-    blurred = cv2.GaussianBlur(gray, (k, k), 0)
-    _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
-    if config.morph_close_size > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (config.morph_close_size, config.morph_close_size)
-        )
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    binary = _binarize(frame)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # Render binary as BGR so we can draw coloured overlays
@@ -444,7 +475,7 @@ def debug_frame():
 
     # Annotate with current param values so a screenshot is self-documenting
     lines = [
-        f"threshold={config.threshold}  blur={config.blur_kernel}  close={config.morph_close_size}",
+        f"threshold={config.threshold}  blur={config.blur_kernel}  close={config.morph_close_size}  gradient={config.use_gradient}",
         f"min_area={config.min_contour_area:.0f}  max_area={config.max_contour_area:.0f}",
         f"candidates={len(candidates)}  all_contours={len(contours)}",
     ]

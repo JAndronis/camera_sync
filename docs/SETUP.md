@@ -99,6 +99,8 @@ Tune in this order:
 
 Iterate: change a value in the JSON config (or pass the matching CLI flag), restart the server, reload `/debug_frame`.
 
+If the droplet's brightness relative to the background drifts over a beamtime and you find yourself re-tuning `threshold` often, try `use_gradient: true` (see [USAGE.md](USAGE.md#absolute-vs-gradient-thresholding)) — it thresholds edge strength instead of absolute brightness. Switching modes means starting the `threshold` tuning above over from scratch; the two modes don't share a meaningful numeric range.
+
 ### 2.4 Confirm calibration end-to-end
 
 With the server running against your finished config:
