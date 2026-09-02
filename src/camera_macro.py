@@ -44,7 +44,7 @@ class camera_scan(Macro):
             r.raise_for_status()
             status = r.json()
             # If latest_frame is None the capture_loop hasn't started yet
-            if not status.get("camera_open", True):
+            if not status.get("camera_connected", True):
                 raise RuntimeError("Camera server is up but camera is not open")
             self.info(f"Camera server OK - preview at {CAMERA_URL}/preview")
         except requests.exceptions.ConnectionError:
@@ -140,7 +140,7 @@ class camera_scan(Macro):
                 self.warning(f"Camera error during recording: {cam_error}")
                 self.warning(f"File may be incomplete or corrupted: {stopped_filename}")
             else:
-                self.infor(f"Camera video saved: {video_filename}")
+                self.info(f"Camera video saved: {video_filename}")
 
         # 4. Fetch ellipse measurements accumulated during the scan
         measurements = self._fetch_measurements()
