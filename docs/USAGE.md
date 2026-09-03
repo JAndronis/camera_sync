@@ -1,6 +1,6 @@
 # Usage reference
 
-Full reference for the config file, CLI flags, HTTP API, and Sardana macro. For installation see [SETUP.md](SETUP.md); for a fast path to a working scan see [QUICKSTART.md](QUICKSTART.md).
+Full reference for the config file, CLI flags, HTTP API, and Sardana macro. For installation see [SETUP.md](SETUP.md); for a fast path to a working scan see [QUICKSTART.md](QUICKSTART.md); for offline re-fitting see [FITTING_API.md](FITTING_API.md).
 
 ## Configuration
 
@@ -35,6 +35,10 @@ Things that are **not** configurable via file or flag — edit the constants nea
 | `RECORD_FPS` | `30` | Framerate passed to ffmpeg for the recording container |
 
 ## Ellipse detection pipeline
+
+The detection pipeline (`Config`, `binarize`, `detect_ellipse`, `draw_overlay`) lives in
+`src/ellipse_fitting.py`, separate from `camera_server.py`, with no Flask/threading/camera
+dependencies. See [FITTING_API.md](FITTING_API.md) for the API reference.
 
 For each frame, in order:
 

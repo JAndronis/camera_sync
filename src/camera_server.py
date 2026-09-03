@@ -3,20 +3,32 @@ import dataclasses
 import io
 import json
 import logging
-import math
+import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 
 import cv2
+import h5py
 import matplotlib
 import matplotlib.ticker as mticker
-from flask import Flask, Response, jsonify
+import numpy as np
+from flask import Flask, Response, jsonify, send_file
 from matplotlib.figure import Figure
+
+from ellipse_fitting import (
+    Config,
+    detect_ellipse,
+    draw_overlay,
+    find_candidate_contours,
+)
+from ellipse_fitting import binarize as _binarize
 
 matplotlib.use("Agg")  # non-interactive backend, required for server-side rendering
 
@@ -55,27 +67,12 @@ PREVIEW_QUALITY = 50
 H264_CRF = 28
 RECORD_FPS = 30
 
-
-@dataclasses.dataclass
-class Config:
-    camera_index: int = 0
-    pixels_per_mm: float = 1.0
-    # Ellipse detection params
-    blur_kernel: int = 5  # Gaussian blur kernel size (must be odd)
-    threshold: int = 127  # binary threshold (0-255); pixels below -> foreground
-    min_contour_area: float = 200.0  # px^2
-    max_contour_area: float = 100000.0  # px^2
-    # Morphological closing kernel size (px). Fills bright specular reflections that
-    # would otherwise leave a hole in the binary droplet blob. 0 = disabled.
-    morph_close_size: int = 0
-    # Optional crop applied before detection; set to [x, y, width, height] in pixels.
-    # Strongly recommended: keeps the cylinder / transducers out of the search area.
-    roi: list | None = dataclasses.field(default=None)
-    # Threshold Sobel gradient magnitude instead of absolute intensity. More robust
-    # to illumination drift and specular holes, more sensitive to other edges inside
-    # the ROI. Uses the same `threshold` field, but on a very different scale -
-    # re-tune via /debug_frame after switching.
-    use_gradient: bool = False
+# Raw-frame backup: batch writes to amortize h5py resize/write call overhead
+# instead of one HDF5 call per frame. ~1s worth of frames at RECORD_FPS=30, or
+# after 1s of wall time (so a low/idle frame rate doesn't stall a flush).
+RAW_FRAME_FLUSH_BATCH_SIZE = 30
+RAW_FRAME_FLUSH_INTERVAL_S = 1.0
+RAW_FRAME_CLOSE_TIMEOUT_S = 10.0
 
 
 def _parse_args():
@@ -109,6 +106,16 @@ def _parse_args():
         "(re-tune --threshold after switching; see docs/SETUP.md)",
     )
     p.add_argument(
+        "--raw-frame-dir",
+        metavar="DIR",
+        help="Local scratch directory for raw-frame HDF5 backups; requires --roi",
+    )
+    p.add_argument(
+        "--raw-frame-min-free-mb",
+        type=float,
+        help="Minimum free space (MB) in --raw-frame-dir required to enable raw-frame saving",
+    )
+    p.add_argument(
         "--debug",
         action="store_true",
         help="Enable /debug_frame endpoint (shows binary threshold image)",
@@ -135,6 +142,8 @@ def _build_config(args) -> Config:
         "morph_close_size": args.morph_close_size,
         "roi": args.roi,
         "use_gradient": args.use_gradient,
+        "raw_frame_dir": args.raw_frame_dir,
+        "raw_frame_min_free_mb": args.raw_frame_min_free_mb,
     }
     for attr, val in cli_overrides.items():
         if val is not None:
@@ -158,6 +167,20 @@ state = {"recording": False, "filename": None, "error": None}
 measurements: list[dict] = []
 measurements_lock = threading.Lock()
 
+# Raw-frame backup pipeline: fully independent of encode_queue/frame_lock beyond
+# the crop-and-copy performed inside capture_loop's existing frame_lock section.
+# raw_frame_writer_loop is the sole owner of raw_frame_file; /start, /stop, and
+# _shutdown only ever signal it via raw_frame_queue + raw_frame_closed_event.
+raw_frame_queue = queue.Queue()  # deliberately unbounded, like encode_queue - see docs
+raw_frame_lock = threading.Lock()
+raw_frame_file = None
+raw_frame_filename = None
+raw_frame_frame_count = 0
+raw_frame_error = None
+raw_frame_active = False
+raw_frame_closed_event = threading.Event()
+_RAW_FRAME_CLOSE_SENTINEL = object()
+
 
 def capture_loop():
     global latest_frame
@@ -167,7 +190,7 @@ def capture_loop():
             msg = "Failed to capture frame"
             if state["error"] != msg:
                 logger.error(msg)
-            state["error"] = msg
+            state["error"] = msg  # ty: ignore[invalid-assignment]
             time.sleep(0.05)
             continue
         with frame_lock:
@@ -179,7 +202,12 @@ def capture_loop():
                     msg = "Encoding queue is full, dropping frame"
                     if state["error"] != msg:
                         logger.warning(msg)
-                    state["error"] = msg
+                    state["error"] = msg  # ty: ignore[invalid-assignment]
+            if raw_frame_active and config.roi is not None:
+                rx, ry, rw, rh = config.roi
+                raw_frame_queue.put(
+                    (frame[ry : ry + rh, rx : rx + rw].copy(), time.time())
+                )
 
 
 def encoding_loop():
@@ -192,96 +220,77 @@ def encoding_loop():
             proc = ffmpeg_process
             if proc is not None:
                 try:
-                    proc.stdin.write(frame)
+                    proc.stdin.write(frame)  # ty: ignore[unresolved-attribute]
                 except BrokenPipeError:
                     msg = "FFmpeg process has terminated unexpectedly"
                     logger.error(msg)
-                    state["error"] = msg
+                    state["error"] = msg  # ty: ignore[invalid-assignment]
                     state["recording"] = False
 
 
-def _binarize(frame):
-    """Grayscale, blur, and threshold a frame into a binary foreground mask.
+def raw_frame_writer_loop():
+    """Sole owner of raw_frame_file. Batches frames to amortize per-call HDF5
+    overhead, flushing every RAW_FRAME_FLUSH_BATCH_SIZE frames or
+    RAW_FRAME_FLUSH_INTERVAL_S seconds, whichever comes first.
 
-    Uses absolute intensity by default (THRESH_BINARY_INV: pixels below
-    `threshold` become foreground). If config.use_gradient is set, thresholds
-    Sobel gradient magnitude instead - more robust to illumination drift and
-    to specular reflections splitting the blob, but more sensitive to any
-    other sharp edge inside the ROI.
+    /start, /stop and _shutdown never touch raw_frame_file directly - they only
+    ever put a frame or _RAW_FRAME_CLOSE_SENTINEL on raw_frame_queue, since HDF5
+    is not safe for concurrent writers.
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    k = config.blur_kernel | 1  # ensure odd
-    blurred = cv2.GaussianBlur(gray, (k, k), 0)
+    global raw_frame_frame_count, raw_frame_error, raw_frame_file
 
-    if config.use_gradient:
-        gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0)
-        gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1)
-        gradient_mag = cv2.magnitude(gx, gy)
-        _, binary = cv2.threshold(gradient_mag, config.threshold, 255, cv2.THRESH_BINARY)
-        binary = binary.astype("uint8")
-    else:
-        _, binary = cv2.threshold(blurred, config.threshold, 255, cv2.THRESH_BINARY_INV)
+    frames_buf: list = []
+    timestamps_buf: list = []
+    last_flush = time.monotonic()
 
-    if config.morph_close_size > 0:
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (config.morph_close_size, config.morph_close_size)
-        )
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    return binary
+    def flush():
+        nonlocal last_flush
+        global raw_frame_frame_count, raw_frame_error
+        if frames_buf and raw_frame_file is not None:
+            try:
+                with raw_frame_lock:
+                    n = raw_frame_file["frames"].shape[0]
+                    batch = len(frames_buf)
+                    raw_frame_file["frames"].resize(n + batch, axis=0)
+                    raw_frame_file["frames"][n : n + batch] = np.stack(frames_buf)
+                    raw_frame_file["timestamps"].resize(n + batch, axis=0)
+                    raw_frame_file["timestamps"][n : n + batch] = timestamps_buf
+                    raw_frame_frame_count = n + batch
+            except Exception as e:
+                msg = f"Failed to write raw frame batch: {e}"
+                if raw_frame_error != msg:
+                    logger.error(msg)
+                raw_frame_error = msg
+        frames_buf.clear()
+        timestamps_buf.clear()
+        last_flush = time.monotonic()
 
+    while True:
+        try:
+            item = raw_frame_queue.get(timeout=0.5)
+        except queue.Empty:
+            if (
+                frames_buf
+                and (time.monotonic() - last_flush) > RAW_FRAME_FLUSH_INTERVAL_S
+            ):
+                flush()
+            continue
 
-def _detect_ellipse(frame) -> tuple[dict, tuple] | tuple[None, None]:
-    """Fit an ellipse to the largest foreground contour within the configured ROI.
+        if item is _RAW_FRAME_CLOSE_SENTINEL:
+            flush()
+            with raw_frame_lock:
+                if raw_frame_file is not None:
+                    raw_frame_file.flush()
+                    raw_frame_file.close()
+                    raw_frame_file = None
+            raw_frame_closed_event.set()
+            continue
 
-    Returns (measurement_dict, cv2_ellipse_in_full_frame) or (None, None).
-    """
-    roi_offset_x = roi_offset_y = 0
-    if config.roi is not None:
-        rx, ry, rw, rh = config.roi
-        frame = frame[ry : ry + rh, rx : rx + rw]
-        roi_offset_x, roi_offset_y = rx, ry
-
-    binary = _binarize(frame)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    candidates = [
-        c
-        for c in contours
-        if config.min_contour_area <= cv2.contourArea(c) <= config.max_contour_area
-        and len(c) >= 5  # fitEllipse requires at least 5 points
-    ]
-    if not candidates:
-        return None, None
-
-    contour = max(candidates, key=cv2.contourArea)
-    try:
-        ellipse = cv2.fitEllipse(contour)
-    except cv2.error:
-        # Degenerate contour (e.g. near-collinear points) - skip this frame
-        # rather than letting the exception kill the detection thread.
-        return None, None
-    (cx_px, cy_px), axes_px, angle = ellipse
-
-    # Shift ellipse centre back to full-frame coordinates for drawing
-    cx_full = cx_px + roi_offset_x
-    cy_full = cy_px + roi_offset_y
-    ellipse_full_frame = ((cx_full, cy_full), axes_px, angle)
-
-    # Convert to mm; semi-axes (half the full axis lengths)
-    axis1_px, axis2_px = axes_px
-    a_mm = max(axis1_px, axis2_px) / 2.0 / config.pixels_per_mm  # equatorial semi-axis
-    b_mm = min(axis1_px, axis2_px) / 2.0 / config.pixels_per_mm  # polar semi-axis
-
-    # Oblate spheroid (axial symmetry around the polar axis): V = (4/3) * pi * a^2 * b
-    volume_mm3 = (4.0 / 3.0) * math.pi * a_mm**2 * b_mm
-
-    measurement = {
-        "timestamp": time.time(),
-        "cx_mm": cx_full / config.pixels_per_mm,
-        "cy_mm": cy_full / config.pixels_per_mm,
-        "volume_mm3": volume_mm3,
-    }
-    return measurement, ellipse_full_frame
+        frame, ts = item
+        frames_buf.append(frame)
+        timestamps_buf.append(ts)
+        if len(frames_buf) >= RAW_FRAME_FLUSH_BATCH_SIZE:
+            flush()
 
 
 def ellipse_detection_loop():
@@ -294,16 +303,11 @@ def ellipse_detection_loop():
             time.sleep(0.02)
             continue
 
-        measurement, ellipse = _detect_ellipse(frame)
+        measurement, ellipse = detect_ellipse(frame, config)
 
         annotated = frame
         if ellipse is not None or config.roi is not None:
-            annotated = frame.copy()
-            if config.roi is not None:
-                rx, ry, rw, rh = config.roi
-                cv2.rectangle(annotated, (rx, ry), (rx + rw, ry + rh), (0, 200, 255), 1)
-            if ellipse is not None:
-                cv2.ellipse(annotated, ellipse, (0, 255, 0), 2)
+            annotated = draw_overlay(frame, ellipse, config.roi)
 
         with annotated_frame_lock:
             latest_annotated_frame = annotated
@@ -316,6 +320,7 @@ def ellipse_detection_loop():
 threading.Thread(target=capture_loop, daemon=True).start()
 threading.Thread(target=encoding_loop, daemon=True).start()
 threading.Thread(target=ellipse_detection_loop, daemon=True).start()
+threading.Thread(target=raw_frame_writer_loop, daemon=True).start()
 
 
 def generate_preview():
@@ -341,6 +346,71 @@ def preview():
     )
 
 
+def _start_raw_frame_saving(timestamp: str) -> None:
+    """Preflight-check disk space and open a new per-recording raw-frame HDF5
+    file if raw-frame saving is configured (requires both raw_frame_dir and
+    roi). Never raises - on any problem it leaves raw-frame saving disabled
+    for this recording, surfaced via raw_frame_error, and the mp4 recording
+    proceeds unaffected either way.
+    """
+    global raw_frame_file, raw_frame_filename, raw_frame_frame_count
+    global raw_frame_error, raw_frame_active
+
+    raw_frame_filename = None
+    raw_frame_frame_count = 0
+    raw_frame_error = None
+    raw_frame_active = False
+
+    if config.raw_frame_dir is None:
+        return
+    if config.roi is None:
+        msg = "raw_frame_dir is set but roi is not - raw frame saving disabled"
+        logger.warning(msg)
+        raw_frame_error = msg
+        return
+
+    try:
+        os.makedirs(config.raw_frame_dir, exist_ok=True)
+        free_mb = shutil.disk_usage(config.raw_frame_dir).free / (1024 * 1024)
+        if free_mb < config.raw_frame_min_free_mb:
+            msg = (
+                f"Insufficient disk space for raw frame saving: "
+                f"{free_mb:.0f} MB free < {config.raw_frame_min_free_mb:.0f} MB required"
+            )
+            logger.warning(msg)
+            raw_frame_error = msg
+            return
+
+        while not raw_frame_queue.empty():
+            raw_frame_queue.get_nowait()
+
+        rx, ry, rw, rh = config.roi
+        filename = f"raw_frames_{timestamp}.h5"
+        path = os.path.join(config.raw_frame_dir, filename)
+        f = h5py.File(path, "w")
+        f.attrs["roi"] = config.roi
+        f.attrs["pixels_per_mm"] = config.pixels_per_mm
+        f.attrs["channel_order"] = "BGR"
+        f.create_dataset(
+            "frames",
+            shape=(0, rh, rw, 3),
+            maxshape=(None, rh, rw, 3),
+            dtype="uint8",
+            chunks=(1, rh, rw, 3),
+        )
+        f.create_dataset("timestamps", shape=(0,), maxshape=(None,), dtype="float64")
+    except Exception as e:
+        msg = f"Failed to open raw frame file: {e}"
+        logger.error(msg)
+        raw_frame_error = msg
+        return
+
+    with raw_frame_lock:
+        raw_frame_file = f
+    raw_frame_filename = filename
+    raw_frame_active = True
+
+
 @app.route("/start", methods=["POST"])
 def start_recording():
     global ffmpeg_process
@@ -357,6 +427,8 @@ def start_recording():
     filename = f"recording_{timestamp}.mp4"
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    _start_raw_frame_saving(timestamp)
 
     proc = subprocess.Popen(
         [
@@ -391,14 +463,21 @@ def start_recording():
     with frame_lock:
         ffmpeg_process = proc
 
-    state.update({"recording": True, "filename": filename, "error": None})
+    state.update({"recording": True, "filename": filename, "error": None})  # ty: ignore[no-matching-overload]
     logger.info("Recording started: %s (%dx%d @ %d fps)", filename, w, h, RECORD_FPS)
-    return jsonify({"message": "Recording started", "filename": filename})
+    return jsonify(
+        {
+            "message": "Recording started",
+            "filename": filename,
+            "raw_frame_filename": raw_frame_filename,
+            "raw_frame_saving_enabled": raw_frame_active,
+        }
+    )
 
 
 @app.route("/stop", methods=["POST"])
 def stop_recording():
-    global ffmpeg_process
+    global ffmpeg_process, raw_frame_active
     if not state["recording"]:
         return jsonify({"status": "not recording", "error": state["error"]}), 400
 
@@ -406,7 +485,7 @@ def stop_recording():
         try:
             frame = encode_queue.get_nowait()
             if ffmpeg_process:
-                ffmpeg_process.stdin.write(frame)
+                ffmpeg_process.stdin.write(frame)  # ty: ignore[unresolved-attribute]
         except queue.Empty:
             break
 
@@ -415,18 +494,31 @@ def stop_recording():
         ffmpeg_process = None
 
     if proc:
-        proc.stdin.close()
+        proc.stdin.close()  # ty: ignore[unresolved-attribute]
         proc.wait()
 
     state["recording"] = False
+    raw_frame_active = False
+
+    # Route the final flush+close through raw_frame_writer_loop (the sole owner
+    # of raw_frame_file) rather than touching it here - HDF5 is not safe for
+    # concurrent writers. Harmless no-op if raw-frame saving wasn't active.
+    raw_frame_closed_event.clear()
+    raw_frame_queue.put(_RAW_FRAME_CLOSE_SENTINEL)
+    if not raw_frame_closed_event.wait(timeout=RAW_FRAME_CLOSE_TIMEOUT_S):
+        logger.error("Timed out waiting for raw frame file to close")
 
     with measurements_lock:
         n = len(measurements)
 
+    with raw_frame_lock:
+        raw_count = raw_frame_frame_count
+
     logger.info(
-        "Recording stopped: %s (%d measurements, error=%s)",
+        "Recording stopped: %s (%d measurements, %d raw frames, error=%s)",
         state["filename"],
         n,
+        raw_count,
         state["error"],
     )
     return jsonify(
@@ -435,8 +527,106 @@ def stop_recording():
             "filename": state["filename"],
             "error": state["error"],
             "measurement_count": n,
+            "raw_frame_filename": raw_frame_filename,
+            "raw_frame_count": raw_count,
+            "raw_frame_error": raw_frame_error,
         }
     )
+
+
+def _resolve_recording_path(base_dir: str, filename: str) -> str | None:
+    """Resolve `filename` to an absolute path under `base_dir`, rejecting any
+    path traversal. Returns None if invalid or outside base_dir."""
+    if (
+        not filename
+        or filename in (".", "..")
+        or os.path.basename(filename) != filename
+    ):
+        return None
+    base_dir = os.path.abspath(base_dir)
+    path = os.path.abspath(os.path.join(base_dir, filename))
+    if os.path.commonpath([base_dir, path]) != base_dir:
+        return None
+    return path
+
+
+# camera_macro.py pulls both the video and the raw-frame backup through this
+# same shape of endpoint pair after /stop, then copies the bytes into the
+# scan's ScanDir and acks so the local hutch-laptop copy can be cleaned up.
+@dataclasses.dataclass(frozen=True)
+class _RecordingKind:
+    base_dir: Callable[[], str | None]
+    is_active: Callable[[str], bool]
+    mimetype: str
+
+
+_RECORDING_KINDS: dict[str, _RecordingKind] = {
+    "video": _RecordingKind(
+        base_dir=lambda: os.getcwd(),
+        is_active=lambda filename: bool(
+            state["recording"] and filename == state["filename"]
+        ),
+        mimetype="video/mp4",
+    ),
+    "raw_frames": _RecordingKind(
+        base_dir=lambda: config.raw_frame_dir,
+        is_active=lambda filename: bool(
+            raw_frame_active and filename == raw_frame_filename
+        ),
+        mimetype="application/x-hdf5",
+    ),
+}
+
+
+def _get_recording_file(kind: str, filename: str):
+    spec = _RECORDING_KINDS[kind]
+    if spec.is_active(filename):
+        return jsonify({"error": "recording in progress, stop first"}), 409
+    base_dir = spec.base_dir()
+    path = _resolve_recording_path(base_dir, filename) if base_dir else None
+    if path is None or not os.path.isfile(path):
+        return jsonify({"error": "not found"}), 404
+    return send_file(
+        path, mimetype=spec.mimetype, as_attachment=True, download_name=filename
+    )
+
+
+def _ack_recording_file(kind: str, filename: str):
+    spec = _RECORDING_KINDS[kind]
+    if spec.is_active(filename):
+        return jsonify({"error": "recording in progress, stop first"}), 409
+    base_dir = spec.base_dir()
+    path = _resolve_recording_path(base_dir, filename) if base_dir else None
+    if path is None:
+        return jsonify({"error": "invalid filename"}), 400
+    if not os.path.isfile(path):
+        return jsonify({"deleted": False, "already_gone": True})
+    os.remove(path)
+    return jsonify({"deleted": True, "already_gone": False})
+
+
+app.add_url_rule(
+    "/video/<filename>",
+    "get_video_file",
+    lambda filename: _get_recording_file("video", filename),
+)
+app.add_url_rule(
+    "/video/<filename>/ack",
+    "ack_video_file",
+    lambda filename: _ack_recording_file("video", filename),
+    methods=["POST"],
+)
+app.add_url_rule(
+    "/raw_frames/<filename>",
+    "get_raw_frame_file",
+    lambda filename: _get_recording_file("raw_frames", filename),
+)
+app.add_url_rule(
+    "/raw_frames/<filename>/ack",
+    "ack_raw_frame_file",
+    lambda filename: _ack_recording_file("raw_frames", filename),
+    methods=["POST"],
+)
 
 
 def debug_frame():
@@ -454,18 +644,13 @@ def debug_frame():
         rx, ry, rw, rh = config.roi
         frame = frame[ry : ry + rh, rx : rx + rw]
 
-    binary = _binarize(frame)
+    binary = _binarize(frame, config)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     # Render binary as BGR so we can draw coloured overlays
     debug = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
 
-    candidates = [
-        c
-        for c in contours
-        if config.min_contour_area <= cv2.contourArea(c) <= config.max_contour_area
-        and len(c) >= 5
-    ]
+    candidates = find_candidate_contours(contours, config)
     # All contours in the frame (grey), candidates in white, winner in red
     cv2.drawContours(debug, contours, -1, (100, 100, 100), 1)
     cv2.drawContours(debug, candidates, -1, (255, 255, 255), 1)
@@ -596,8 +781,18 @@ def get_calibration():
 def status():
     with measurements_lock:
         n = len(measurements)
+    with raw_frame_lock:
+        raw_count = raw_frame_frame_count
     return jsonify(
-        {**state, "camera_connected": cap.isOpened(), "measurement_count": n}
+        {
+            **state,
+            "camera_connected": cap.isOpened(),
+            "measurement_count": n,
+            "raw_frame_saving_enabled": raw_frame_active,
+            "raw_frame_filename": raw_frame_filename,
+            "raw_frame_count": raw_count,
+            "raw_frame_error": raw_frame_error,
+        }
     )
 
 
@@ -606,6 +801,11 @@ def _shutdown(sig, frame):
     logger.info("Shutting down (signal %s)", sig)
     if ffmpeg_process is not None:
         ffmpeg_process.kill()
+    # Harmless no-op if raw-frame saving wasn't active; bounded wait so
+    # shutdown can't hang indefinitely.
+    raw_frame_closed_event.clear()
+    raw_frame_queue.put(_RAW_FRAME_CLOSE_SENTINEL)
+    raw_frame_closed_event.wait(timeout=RAW_FRAME_CLOSE_TIMEOUT_S)
     cap.release()
     sys.exit(0)
 

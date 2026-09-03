@@ -55,6 +55,7 @@ Auto-refreshes once a second with a plot of droplet volume vs. time since record
 - Raw per-frame measurements for the last recording are still available at `http://<hutch-laptop-ip>:8989/measurements` until the next `/start` clears them.
 - The video file (`recording_<timestamp>.mp4`) is written to the working directory `camera_server.py` was launched from, on the hutch laptop.
 - The timestamp/volume arrays are in the scan's HDF5 file, written via Sardana's custom-data mechanism — see [USAGE.md](USAGE.md#hdf5-output) for how to find them.
+- To re-fit a recording offline with different parameters, see [FITTING_API.md](FITTING_API.md).
 
 ## Something not working?
 

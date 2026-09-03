@@ -52,8 +52,15 @@ Three daemon threads run concurrently:
 
 All shared mutable state is protected by explicit `threading.Lock` objects (`frame_lock`, `annotated_frame_lock`, `measurements_lock`).
 
-### Ellipse detection pipeline (`_detect_ellipse`)
+### Ellipse detection pipeline (`src/ellipse_fitting.py`)
 
+`Config`, `binarize`, `find_candidate_contours`, `detect_ellipse`, and `draw_overlay` live in
+`src/ellipse_fitting.py`, not `camera_server.py`, with no Flask/threading/camera dependencies —
+importable standalone to re-fit a saved recording offline.
+`camera_server.py`'s `ellipse_detection_loop` thread calls `detect_ellipse(frame, config)`.
+See [docs/FITTING_API.md](docs/FITTING_API.md) for the API reference.
+
+`detect_ellipse`:
 1. Crop to ROI (if configured)
 2. Grayscale -> Gaussian blur -> `THRESH_BINARY_INV` (droplet darker than background)
 3. Optional morphological closing to fill specular reflection holes
@@ -86,6 +93,6 @@ All shared mutable state is protected by explicit `threading.Lock` objects (`fra
 5. `GET /measurements` -> fetch ellipse time-series
 6. Writes video filename + ellipse arrays to the last `entry` group in the scan's HDF5 file under `custom_data/ellipse_tracking/`
 
-### Configuration (`Config` dataclass)
+### Configuration (`Config` dataclass, defined in `src/ellipse_fitting.py`)
 
 Config is populated from a JSON file (`--config`) first, then overridden by CLI flags. The `calibration_example.json` shows a real working configuration. The `roi` field (`[x, y, width, height]` in pixels) is strongly recommended to exclude the transducers from the detection area.
