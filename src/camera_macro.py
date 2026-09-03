@@ -7,9 +7,9 @@ from sardana.macroserver.macro import Macro, Type
 
 CAMERA_URL = "http://<hutch-laptop-ip>:8989"  # TODO: make this configurable via env var or macro arg
 TIMEOUT = 10  # TODO: also make this configurable, and maybe add retry logic to handle transient failures better
-# The video and raw-frame backup are streamed straight to disk (not held in
-# memory), but a large recording can still take a while to transfer - this is
-# deliberately separate from TIMEOUT, which stays sized for small JSON calls.
+# The raw-frame backup is streamed straight to disk (not held in memory), but
+# a large recording can still take a while to transfer - this is deliberately
+# separate from TIMEOUT, which stays sized for small JSON calls.
 RAW_FRAME_FETCH_TIMEOUT = 300
 
 
@@ -224,37 +224,30 @@ class camera_scan(Macro):
         measurements = self._fetch_measurements()
         self.info(f"Fetched {len(measurements)} ellipse measurements")
 
-        # 4b. Archive the video and raw-frame backup onto server storage,
-        # alongside the scan's own HDF5 file. Best-effort and strictly after
-        # the scan has already completed - a failure here can never affect
-        # whether the scan itself succeeded.
-        video_archived = raw_frames_archived = False
+        # 4b. Archive the raw-frame backup onto server storage, alongside the
+        # scan's own HDF5 file. The mp4 stays on the hutch laptop only - once
+        # raw_frames.h5 is archived it holds the same recording losslessly,
+        # so archiving both would be redundant. Best-effort and strictly
+        # after the scan has already completed - a failure here can never
+        # affect whether the scan itself succeeded.
+        raw_frames_archived = False
         try:
             scan_dir = self.getEnv("ScanDir")
         except Exception as e:
             scan_dir = None
             self.warning(
-                f"ScanDir not available, cannot archive video/raw frames to server: {e}"
+                f"ScanDir not available, cannot archive raw frames to server: {e}"
             )
 
-        if scan_dir:
-            if video_filename:
-                video_archived = self._copy_recording_to_scandir(
-                    "video", video_filename, scan_dir
-                )
-            if raw_frame_filename and raw_frame_count:
-                raw_frames_archived = self._copy_recording_to_scandir(
-                    "raw_frames", raw_frame_filename, scan_dir
-                )
+        if scan_dir and raw_frame_filename and raw_frame_count:
+            raw_frames_archived = self._copy_recording_to_scandir(
+                "raw_frames", raw_frame_filename, scan_dir
+            )
 
         # 5. Persist filename and measurements
         self.setEnv("LastVideoFile", video_filename)
         if inner_macro is not None:
             self._write_measurements(inner_macro, measurements)
-            if video_archived:
-                self._write_file_reference(
-                    inner_macro, "side_camera_video_file", video_filename
-                )
             if raw_frames_archived:
                 self._write_file_reference(
                     inner_macro, "side_camera_raw_frame_file", raw_frame_filename

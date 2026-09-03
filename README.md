@@ -17,20 +17,22 @@ Camera server and Sardana macro for the CoSAXS acoustic levitator at MAX IV. A m
 │       Hutch laptop       │   HTTP: /start /stop    │  Sardana control system  │
 │     camera_server.py     │◄───/measurements────────│     camera_macro.py      │
 │                          │◄───/status /preview─────│   (camera_scan macro)    │
-│                          │◄───/video /raw_frames───│                          │
+│                          │◄───/raw_frames──────────│                          │
 │  USB microscope camera   │                         │                          │
 └────────────┬─────────────┘                         └─────────────┬────────────┘
              │ writes                                              │ pulls + writes
              ▼                                                     ▼
-          recording_<ts>.mp4                                       scan's HDF5 file (in ScanDir)
-          raw_frames_<ts>.h5 (optional)                            side_camera_timestamp / volume_mm3 / file refs
-          (hutch laptop, until copied)                             + copies of both files above
+          recording_<ts>.mp4 (local only)                          scan's HDF5 file (in ScanDir):
+          raw_frames_<ts>.h5 (optional)                            side_camera_timestamp / volume_mm3
+                                                                   side_camera_raw_frame_file
+                                                                   + a copy of raw_frames_<ts>.h5
 ```
 
 The camera server runs continuously and independently — it serves a live preview at all times.
-Recording, the optional raw-frame backup (`raw_frame_dir`), and the HDF5 write-back only happen
-when a scan is wrapped with `camera_scan`; the macro then pulls the video (and raw-frame file, if
-saved) off the hutch laptop into `ScanDir` alongside the scan's own HDF5 file. See
+Recording and the HDF5 write-back only happen when a scan is wrapped with `camera_scan`; the
+mp4 stays on the hutch laptop, but if raw-frame saving is enabled (`raw_frame_dir`) the macro
+pulls `raw_frames_<ts>.h5` into `ScanDir` alongside the scan's own HDF5 file — the mp4 isn't
+archived too, since the raw frames already hold the same recording losslessly. See
 [docs/FITTING_API.md](docs/FITTING_API.md) for what's in `raw_frames_<ts>.h5`.
 
 ## Repository layout
@@ -45,6 +47,7 @@ saved) off the hutch laptop into `ScanDir` alongside the scan's own HDF5 file. S
 │   └── camera_macro.py    # Sardana macro: camera_scan (control system)
 ├── calibration_example.json  # Example detector calibration
 ├── docs/                  # Setup / quick start / usage docs
+├── notebooks/             # Example Jupyter notebooks using the fitting API
 ├── pyproject.toml
 └── CLAUDE.md              # Architecture notes
 ```
