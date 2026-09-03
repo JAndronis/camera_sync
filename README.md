@@ -17,15 +17,21 @@ Camera server and Sardana macro for the CoSAXS acoustic levitator at MAX IV. A m
 │       Hutch laptop       │   HTTP: /start /stop    │  Sardana control system  │
 │     camera_server.py     │◄───/measurements────────│     camera_macro.py      │
 │                          │◄───/status /preview─────│   (camera_scan macro)    │
+│                          │◄───/video /raw_frames───│                          │
 │  USB microscope camera   │                         │                          │
 └────────────┬─────────────┘                         └─────────────┬────────────┘
-             │ writes                                              │ writes
+             │ writes                                              │ pulls + writes
              ▼                                                     ▼
-    recording_<ts>.mp4                                    scan's HDF5 file
-   (on the hutch laptop)                    (side_camera_timestamp / side_camera_volume_mm3)
+          recording_<ts>.mp4                                       scan's HDF5 file (in ScanDir)
+          raw_frames_<ts>.h5 (optional)                            side_camera_timestamp / volume_mm3 / file refs
+          (hutch laptop, until copied)                             + copies of both files above
 ```
 
-The camera server runs continuously and independently — it serves a live preview at all times. Recording and the HDF5 write-back only happen when a scan is wrapped with `camera_scan`.
+The camera server runs continuously and independently — it serves a live preview at all times.
+Recording, the optional raw-frame backup (`raw_frame_dir`), and the HDF5 write-back only happen
+when a scan is wrapped with `camera_scan`; the macro then pulls the video (and raw-frame file, if
+saved) off the hutch laptop into `ScanDir` alongside the scan's own HDF5 file. See
+[docs/FITTING_API.md](docs/FITTING_API.md) for what's in `raw_frames_<ts>.h5`.
 
 ## Repository layout
 
@@ -35,6 +41,7 @@ The camera server runs continuously and independently — it serves a live previ
 │   ├── camera_server.py   # Flask server: capture, recording, HTTP API (hutch laptop)
 │   ├── ellipse_fitting.py # Fitting pipeline (Config, detect_ellipse, draw_overlay) - no
 │   │                      # Flask/camera deps, importable standalone for offline re-fitting
+│   ├── stability_metrics.py # Stability metrics from detect_ellipse output (no plotting)
 │   └── camera_macro.py    # Sardana macro: camera_scan (control system)
 ├── calibration_example.json  # Example detector calibration
 ├── docs/                  # Setup / quick start / usage docs
