@@ -2,11 +2,11 @@
   "camera_index": 0,
   "pixels_per_mm": 45.2,
   "blur_kernel": 7,
-  "threshold": 110,
+  "threshold": 100,
   "min_contour_area": 50,
   "max_contour_area": 80000,
   "morph_close_size": 15,
-  "roi": [450, 280, 350, 250],
+  "roi": [500, 500, 180, 180],
   "raw_frame_dir": "raw_frames",
   "raw_frame_min_free_mb": 1024
 }

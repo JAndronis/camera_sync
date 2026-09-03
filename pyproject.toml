@@ -17,3 +17,10 @@ dependencies = [
     "scipy>=1.18.1",
     "scikit-image>=0.26.0",
 ]
+
+[project.optional-dependencies]
+notebook = [
+    "ipykernel",
+    "jupyter",
+    "ipywidgets",
+]
