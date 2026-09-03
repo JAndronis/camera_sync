@@ -2,16 +2,18 @@
 
 `src/ellipse_fitting.py` contains the detection pipeline (`Config`, `binarize`,
 `find_candidate_contours`, `detect_ellipse`, `draw_overlay`) as plain functions, with no Flask,
-threading, or camera dependencies. It can be imported and run independently of
-`camera_server.py` — e.g. from a Jupyter notebook — to re-fit a saved recording with different
-parameters.
+threading, or camera dependencies. `src/stability_metrics.py` computes stability metrics from its
+output. Both can be imported and run independently of `camera_server.py` — e.g. from a Jupyter
+notebook — to re-fit a saved recording with different parameters and check how stable the result
+is.
 
 See [USAGE.md](USAGE.md#ellipse-detection-pipeline) for `Config` field meanings and the
 detection pipeline steps.
 
 ## Installation
 
-Only import is `cv2`, already in `pyproject.toml`.
+`ellipse_fitting.py` only needs `cv2`; `stability_metrics.py` only needs `numpy`/`scipy`. Both
+are already in `pyproject.toml`.
 
 ```bash
 uv run jupyter lab
@@ -140,6 +142,86 @@ for frame, ts in zip(frames, timestamps):
 
 Timestamps are Unix epoch floats. Compare with `np.diff(timestamps)` rather than the raw printed
 array, which truncates sub-second differences at default print precision.
+
+## Stability metrics
+
+`src/stability_metrics.py` computes droplet/ellipse stability metrics from a `results` list —
+the same list built above by looping `detect_ellipse`, with `None` for missed fits. No plotting
+here either; call these from a notebook and plot the returned arrays.
+
+### Whole-recording metrics
+
+- `fit_rate(results) -> float` — fraction of frames with a successful fit.
+- `rms_deviation(results, field, detrend_window_s=None) -> float` — RMS deviation of `field`
+  (`"cx_mm"`, `"cy_mm"`, or `"volume_mm3"`) from its mean, or from a rolling trend if
+  `detrend_window_s` is given.
+- `positional_stability(results, detrend_window_s=None) -> float` — combined RMS of `cx_mm`/
+  `cy_mm`, in mm.
+- `volume_stability(results, detrend_window_s=None) -> float` — coefficient of variation of
+  `volume_mm3`.
+- `stability_summary(results, detrend_window_s=None) -> dict` — bundles all of the above plus
+  `n_frames`/`duration_s`.
+
+```python
+from stability_metrics import stability_summary
+stability_summary(results, detrend_window_s=1.0)
+# {'n_frames': 500, 'fit_rate': 0.98, 'duration_s': 16.7,
+#  'positional_rms_mm': 0.03, 'volume_cv': 0.004}
+```
+
+`detrend_window_s` separates fast jitter from slow drift (trap decay, evaporation) before
+computing the deviation — without it, a slow drift inflates the number even if frame-to-frame
+motion is small.
+
+### Detrending
+
+`detrend(results, field, window_s=1.0) -> (timestamps, residual)` subtracts a rolling mean
+(window in seconds, converted to samples via the median frame interval) from `field`, returning
+the residual jitter for frames with a successful fit.
+
+```python
+from stability_metrics import detrend
+ts, residual = detrend(results, "cx_mm", window_s=1.0)
+plt.plot(ts - ts[0], residual)
+```
+
+### Rolling (time-resolved) metrics
+
+Same metrics as above, but returning a `(timestamps, values)` time series instead of one number —
+useful for spotting when stability changes partway through a recording.
+
+- `rolling_mean(results, field, window_s=1.0)` — local rolling mean of `field`.
+- `rolling_rms_deviation(results, field, window_s=1.0)` — local RMS deviation from the rolling
+  mean.
+- `rolling_positional_stability(results, window_s=1.0)` — combined rolling RMS of `cx_mm`/`cy_mm`.
+- `rolling_volume_stability(results, window_s=1.0)` — rolling coefficient of variation of
+  `volume_mm3`.
+
+All of these (and `detrend`) filter `results` the same way — frames with a successful fit — so
+their returned timestamps are identical and can be paired directly, e.g. to shade a rolling mean
+with its rolling RMS as a band:
+
+```python
+from stability_metrics import rolling_mean, rolling_rms_deviation
+
+ts, mean = rolling_mean(results, "cx_mm", window_s=0.5)
+_, rms = rolling_rms_deviation(results, "cx_mm", window_s=0.5)
+
+plt.plot(ts - ts[0], mean)
+plt.fill_between(ts - ts[0], mean - rms, mean + rms, alpha=0.3)
+```
+
+To also exclude bad fits by value (not just missed fits), filter `results` itself before calling
+any of these, by replacing the bad entries with `None` rather than dropping them from a separately
+extracted array — otherwise timestamps and values from different calls can end up different
+lengths:
+
+```python
+results_filtered = [
+    m if (m is not None and m["volume_mm3"] < 10) else None
+    for m in results
+]
+```
 
 ## Comparing against the online fit
 
