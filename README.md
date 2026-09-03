@@ -8,17 +8,17 @@ Camera server and Sardana macro for the CoSAXS acoustic levitator at MAX IV. A m
 - **[Setup](docs/SETUP.md)** — install both halves of the system and calibrate the detector
 - **[Usage reference](docs/USAGE.md)** — full config/CLI/HTTP API/macro reference, plus troubleshooting
 - **[Accessing the fitting API](docs/FITTING_API.md)** — re-fit a saved recording offline, independent of the live server
-- **[CLAUDE.md](CLAUDE.md)** — architecture and internals, for anyone modifying the code
+- **[CLAUDE.md](CLAUDE.md)** — architecture and internals, for anyone modifying the code using claude code
 
 ## How it fits together
 
 ```
-┌──────────────────────────┐                        ┌──────────────────────────┐
-│       Hutch laptop       │   HTTP: /start /stop   │  Sardana control system  │
-│     camera_server.py     │◄───/measurements───────│     camera_macro.py      │
+┌──────────────────────────┐                         ┌──────────────────────────┐
+│       Hutch laptop       │   HTTP: /start /stop    │  Sardana control system  │
+│     camera_server.py     │◄───/measurements────────│     camera_macro.py      │
 │                          │◄───/status /preview─────│   (camera_scan macro)    │
-│  USB microscope camera   │                        │                          │
-└────────────┬─────────────┘                        └─────────────┬────────────┘
+│  USB microscope camera   │                         │                          │
+└────────────┬─────────────┘                         └─────────────┬────────────┘
              │ writes                                              │ writes
              ▼                                                     ▼
     recording_<ts>.mp4                                    scan's HDF5 file
@@ -50,6 +50,13 @@ The camera server runs continuously and independently — it serves a live previ
 
 See [docs/SETUP.md](docs/SETUP.md) for full installation and calibration steps.
 
+## Testing the fitting pipeline
+
+`src/ellipse_fitting.py` has no camera or server dependency, so the detection code can be run
+against any video file — not just live camera input — without starting `camera_server.py`. Use
+this to check a fit against a specific recording or try out parameter changes before applying
+them to a live setup. See [Accessing the fitting API](docs/FITTING_API.md).
+
 ## Development
 
 ```bash
@@ -58,4 +65,4 @@ uv run ruff check src/
 uv run ruff format src/
 ```
 
-There are no automated tests in this repository.
+There is no automated test suite; see [Testing the fitting pipeline](#testing-the-fitting-pipeline) above for exercising the detection code directly.
